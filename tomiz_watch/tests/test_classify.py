@@ -44,3 +44,30 @@ class TestClassify(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SENTINEL_CFG = dict(
+    CFG,
+    out_of_stock_sentinel="只今在庫がありません",
+    page_ok_marker="税込",
+)
+
+
+class TestSentinel(unittest.TestCase):
+    def test_sentinel_present_is_out_of_stock(self):
+        page = "<html><body>（税込： 896.4円）450g 只今在庫がありません</body></html>"
+        self.assertEqual(watch.classify(SENTINEL_CFG, URL, page)[0], watch.OUT_OF_STOCK)
+
+    def test_sentinel_gone_is_in_stock(self):
+        page = "<html><body>（税込： 896.4円）450g <button>カートに入れる</button></body></html>"
+        self.assertEqual(watch.classify(SENTINEL_CFG, URL, page)[0], watch.IN_STOCK)
+
+    def test_anchor_missing_is_unknown(self):
+        # エラーページ。在庫切れの一文が無いからといって在庫復活と誤判定しない。
+        page = "<html><body>ただいまアクセスが集中しています</body></html>"
+        self.assertEqual(watch.classify(SENTINEL_CFG, URL, page)[0], watch.UNKNOWN)
+
+    def test_login_page_wins_over_sentinel(self):
+        page = '<html><body>（税込）<input type="password">パスワードを忘れた方</body></html>'
+        status, _ = watch.classify(SENTINEL_CFG, "https://b2b.tomiz.com/customer/account/login", page)
+        self.assertEqual(status, watch.LOGIN_REQUIRED)

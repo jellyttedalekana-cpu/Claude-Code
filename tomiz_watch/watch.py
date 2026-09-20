@@ -70,6 +70,7 @@ def load_config() -> dict:
     cfg.setdefault("log_file", os.path.join(BASE_DIR, "watch.log"))
     cfg.setdefault("snapshot_dir", os.path.join(BASE_DIR, "snapshots"))
     cfg.setdefault("timeout_seconds", 30)
+    cfg.setdefault("retries", 3)
     cfg.setdefault("notify_on_login_required_hours", 12)
     cfg.setdefault("in_stock_markers", ["カートに入れる", "カートへ入れる", "buy-button", "在庫あり"])
     cfg.setdefault(
@@ -125,6 +126,21 @@ def fetch(cfg: dict) -> tuple[str, str]:
             "Accept-Encoding": "gzip, deflate",
         },
     )
+    attempts = cfg.get("retries", 3)
+    for attempt in range(1, attempts + 1):
+        try:
+            return _read(opener, req, cfg)
+        except urllib.error.HTTPError as exc:
+            # 500番台はサイト側の一時的な不調のことが多い。少し待ってやり直す。
+            if exc.code not in (429, 500, 502, 503, 504) or attempt == attempts:
+                raise
+            wait = 5 * 2 ** (attempt - 1)
+            log.warning("HTTP %s。%s秒待ってやり直します (%s/%s)", exc.code, wait, attempt, attempts)
+            time.sleep(wait)
+    raise RuntimeError("到達しない")
+
+
+def _read(opener, req, cfg: dict) -> tuple[str, str]:
     with opener.open(req, timeout=cfg["timeout_seconds"]) as resp:
         raw = resp.read()
         encoding = (resp.headers.get("Content-Encoding") or "").lower()
@@ -155,6 +171,18 @@ def classify(cfg: dict, final_url: str, page: str) -> tuple[str, list[str]]:
     # ログイン画面に飛ばされた場合は URL かフォームで判別する
     if login_hits and ('type="password"' in page or "/login" in final_url):
         return LOGIN_REQUIRED, login_hits
+
+    sentinel = cfg.get("out_of_stock_sentinel")
+    if sentinel:
+        # 「在庫ありの文言」を当てにいくより、在庫切れの一文が消えたかを見るほうが確実。
+        # ただしログイン切れやエラーページでもその一文は消えるので、
+        # 商品ページだと確信できる目印を先に確かめる。
+        anchor = cfg.get("page_ok_marker")
+        if anchor and anchor not in text:
+            return UNKNOWN, [f"商品ページの目印が見つからない: {anchor}"]
+        if sentinel in text:
+            return OUT_OF_STOCK, [sentinel]
+        return IN_STOCK, [f"「{sentinel}」が消えた"]
 
     out_hits = [m for m in cfg["out_of_stock_markers"] if m in text]
     in_hits = [m for m in cfg["in_stock_markers"] if m in text or m in page]

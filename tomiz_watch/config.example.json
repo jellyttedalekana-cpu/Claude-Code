@@ -10,6 +10,9 @@
     "drafts_folder": null
   },
 
+  "out_of_stock_sentinel": "只今在庫がありません",
+  "page_ok_marker": "税込",
+
   "in_stock_markers": ["カートに入れる", "カートへ入れる", "在庫あり"],
   "out_of_stock_markers": ["在庫切れ", "在庫なし", "売り切れ", "完売", "入荷待ち", "入荷未定", "欠品", "取扱終了", "再入荷"],
   "login_markers": ["ログインID", "パスワードを忘れ", "ログインしてください", "/customer/account/login"],
