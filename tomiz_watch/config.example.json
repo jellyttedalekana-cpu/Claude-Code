@@ -1,0 +1,19 @@
+{
+  "label": "TOMIZ b2b 00195014",
+  "url": "https://b2b.tomiz.com/item/00195014",
+  "cookie_file": "~/tomiz-watch/cookies.txt",
+
+  "gmail": {
+    "address": "you@gmail.com",
+    "to": "you@gmail.com",
+    "app_password": null,
+    "drafts_folder": null
+  },
+
+  "in_stock_markers": ["カートに入れる", "カートへ入れる", "在庫あり"],
+  "out_of_stock_markers": ["在庫切れ", "在庫なし", "売り切れ", "完売", "入荷待ち", "入荷未定", "欠品", "取扱終了", "再入荷"],
+  "login_markers": ["ログインID", "パスワードを忘れ", "ログインしてください", "/customer/account/login"],
+
+  "timeout_seconds": 30,
+  "notify_on_login_required_hours": 12
+}

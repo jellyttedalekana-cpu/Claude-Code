@@ -1,0 +1,8 @@
+# 秘密・実行時のファイルはコミットしない
+config.json
+cookies.txt
+state.json
+*.log
+snapshots/
+__pycache__/
+*.pyc
