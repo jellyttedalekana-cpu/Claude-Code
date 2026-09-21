@@ -72,6 +72,7 @@ def load_config() -> dict:
     cfg.setdefault("timeout_seconds", 30)
     cfg.setdefault("retries", 3)
     cfg.setdefault("notify_on_login_required_hours", 12)
+    cfg.setdefault("notify_on_failure_hours", 6)
     cfg.setdefault("in_stock_markers", ["カートに入れる", "カートへ入れる", "buy-button", "在庫あり"])
     cfg.setdefault(
         "out_of_stock_markers",
@@ -108,6 +109,25 @@ def save_state(path: str, state: dict) -> None:
 # 取得
 # --------------------------------------------------------------------------
 
+def browser_headers(url: str) -> dict:
+    """ブラウザが送るのと同じ顔ぶれのヘッダ。
+    素っ気ない要求に WAF が 500 を返すことがあるため、見た目を揃える。"""
+    origin = "/".join(url.split("/")[:3])
+    return {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+        "Referer": origin + "/",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Connection": "keep-alive",
+    }
+
+
 def fetch(cfg: dict) -> tuple[str, str]:
     """(最終URL, HTML) を返す。"""
     jar = http.cookiejar.MozillaCookieJar()
@@ -119,12 +139,7 @@ def fetch(cfg: dict) -> tuple[str, str]:
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
     req = urllib.request.Request(
         cfg["url"],
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "ja,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate",
-        },
+        headers=browser_headers(cfg["url"]),
     )
     attempts = cfg.get("retries", 3)
     for attempt in range(1, attempts + 1):
@@ -287,6 +302,47 @@ def notify(cfg: dict, subject: str, body: str) -> None:
         raise NotifyFailed(str(exc)) from exc
 
 
+def should_notify_failure(state: dict, now: dt.datetime, hours: int) -> bool:
+    """取得できない状態が hours 以上続いていて、まだ知らせていなければ True。"""
+    since = state.get("fail_since")
+    if not since:
+        return False
+    if now - dt.datetime.fromisoformat(since) < dt.timedelta(hours=hours):
+        return False
+    last = state.get("fail_notified_at")
+    if not last:
+        return True
+    # 続いている間は hours ごとに1回だけ繰り返す
+    return now - dt.datetime.fromisoformat(last) >= dt.timedelta(hours=hours)
+
+
+def diagnose(cfg: dict) -> None:
+    """500 の原因を切り分ける。ヘッダと Cookie の組み合わせを変えて応答コードを見る。"""
+    jar = http.cookiejar.MozillaCookieJar()
+    jar.load(cfg["cookie_file"], ignore_discard=True, ignore_expires=True)
+    full = browser_headers(cfg["url"])
+    minimal = {"User-Agent": USER_AGENT}
+
+    cases = [
+        ("Cookieあり + ブラウザ風ヘッダ", jar, full),
+        ("Cookieあり + 最小ヘッダ", jar, minimal),
+        ("Cookieなし + ブラウザ風ヘッダ", http.cookiejar.CookieJar(), full),
+        ("Cookieなし + 最小ヘッダ", http.cookiejar.CookieJar(), minimal),
+    ]
+    for name, cookies, headers in cases:
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
+        req = urllib.request.Request(cfg["url"], headers=headers)
+        try:
+            with opener.open(req, timeout=cfg["timeout_seconds"]) as resp:
+                body = resp.read()
+                print(f"  {resp.status}  {name}  ({len(body)} バイト)")
+        except urllib.error.HTTPError as exc:
+            print(f"  {exc.code}  {name}  ← 失敗")
+        except Exception as exc:  # noqa: BLE001 - 切り分けが目的なので全部拾う
+            print(f"  ---  {name}  ← {type(exc).__name__}: {exc}")
+        time.sleep(3)
+
+
 def save_snapshot(cfg: dict, page: str) -> str:
     os.makedirs(cfg["snapshot_dir"], exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -315,8 +371,34 @@ def run_check(cfg: dict) -> int:
     try:
         final_url, page = fetch(cfg)
     except (urllib.error.URLError, OSError, ValueError) as exc:
+        now = dt.datetime.now()
         log.error("取得に失敗しました: %s", exc)
-        state["last_error"] = f"{dt.datetime.now().isoformat(timespec='seconds')} {exc}"
+        state["last_error"] = f"{now.isoformat(timespec='seconds')} {exc}"
+        state.setdefault("fail_since", now.isoformat(timespec="seconds"))
+        state["fail_count"] = state.get("fail_count", 0) + 1
+        # 取れない状態が続くと「ずっと在庫切れ」に見える。黙って続けない。
+        if should_notify_failure(state, now, cfg["notify_on_failure_hours"]):
+            try:
+                notify(
+                    cfg,
+                    f"[在庫監視] ずっと取得できていません: {cfg['label']}",
+                    "\n".join(
+                        [
+                            f"{cfg['notify_on_failure_hours']}時間以上、商品ページを取得できていません。",
+                            "在庫の状況は分かっていません（在庫切れのままとは限りません）。",
+                            "",
+                            f"URL: {cfg['url']}",
+                            f"最初に失敗した時刻: {state['fail_since']}",
+                            f"連続失敗回数: {state['fail_count']}",
+                            f"直近のエラー: {exc}",
+                            "",
+                            "ブラウザで開けるならスクリプト側の問題、開けないならサイト側の不調です。",
+                        ]
+                    ),
+                )
+                state["fail_notified_at"] = now.isoformat(timespec="seconds")
+            except NotifyFailed as notify_exc:
+                log.error("失敗通知の下書きも作れませんでした: %s", notify_exc)
         save_state(cfg["state_file"], state)
         return 1
 
@@ -332,7 +414,8 @@ def run_check(cfg: dict) -> int:
             "checked_at": now.isoformat(timespec="seconds"),
         }
     )
-    state.pop("last_error", None)
+    for key in ("last_error", "fail_since", "fail_count", "fail_notified_at"):
+        state.pop(key, None)
 
     if status == LOGIN_REQUIRED:
         # Cookie が切れている。黙って落ちると「在庫切れのまま」と誤解するので知らせる。
@@ -411,10 +494,17 @@ def main() -> int:
     parser.add_argument("--probe", action="store_true", help="在庫らしき文言を表示して調整に使う")
     parser.add_argument("--status", action="store_true", help="今の判定だけ表示する（状態も通知も変えない）")
     parser.add_argument("--test-draft", action="store_true", help="テスト用の下書きを1通作って終了する")
+    parser.add_argument("--diag", action="store_true", help="取得できない原因を切り分ける")
     args = parser.parse_args()
 
     cfg = load_config()
-    setup_logging(cfg, to_stderr=args.probe or args.status or args.test_draft)
+    setup_logging(cfg, to_stderr=args.probe or args.status or args.test_draft or args.diag)
+
+    if args.diag:
+        print(f"URL: {cfg['url']}")
+        print("4通りの条件で試します（各3秒あけます）:")
+        diagnose(cfg)
+        return 0
 
     if args.test_draft:
         create_gmail_draft(

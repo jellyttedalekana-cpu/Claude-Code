@@ -71,3 +71,26 @@ class TestSentinel(unittest.TestCase):
         page = '<html><body>（税込）<input type="password">パスワードを忘れた方</body></html>'
         status, _ = watch.classify(SENTINEL_CFG, "https://b2b.tomiz.com/customer/account/login", page)
         self.assertEqual(status, watch.LOGIN_REQUIRED)
+
+
+class TestFailureNotice(unittest.TestCase):
+    NOW = __import__("datetime").datetime(2026, 9, 22, 12, 0, 0)
+
+    def test_no_failure_recorded(self):
+        self.assertFalse(watch.should_notify_failure({}, self.NOW, 6))
+
+    def test_recent_failure_stays_quiet(self):
+        state = {"fail_since": "2026-09-22T09:00:00"}  # 3時間前
+        self.assertFalse(watch.should_notify_failure(state, self.NOW, 6))
+
+    def test_long_failure_notifies(self):
+        state = {"fail_since": "2026-09-22T05:00:00"}  # 7時間前
+        self.assertTrue(watch.should_notify_failure(state, self.NOW, 6))
+
+    def test_does_not_repeat_immediately(self):
+        state = {"fail_since": "2026-09-22T05:00:00", "fail_notified_at": "2026-09-22T11:00:00"}
+        self.assertFalse(watch.should_notify_failure(state, self.NOW, 6))
+
+    def test_repeats_after_the_interval(self):
+        state = {"fail_since": "2026-09-21T20:00:00", "fail_notified_at": "2026-09-22T05:00:00"}
+        self.assertTrue(watch.should_notify_failure(state, self.NOW, 6))
