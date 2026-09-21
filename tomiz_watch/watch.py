@@ -109,9 +109,17 @@ def save_state(path: str, state: dict) -> None:
 # 取得
 # --------------------------------------------------------------------------
 
+def minimal_headers(url: str) -> dict:  # noqa: ARG001 - 呼び出し側を揃えるため
+    """User-Agent だけ。b2b.tomiz.com ではこれが最も安定している。
+
+    ログイン済み Cookie とブラウザ相当のヘッダを一緒に送ると、
+    このサイトは 500 を返す（--diag で確認）。余計なものを送らない。
+    """
+    return {"User-Agent": USER_AGENT}
+
+
 def browser_headers(url: str) -> dict:
-    """ブラウザが送るのと同じ顔ぶれのヘッダ。
-    素っ気ない要求に WAF が 500 を返すことがあるため、見た目を揃える。"""
+    """ブラウザが送るのと同じ顔ぶれのヘッダ。最小ヘッダで駄目だったときの控え。"""
     origin = "/".join(url.split("/")[:3])
     return {
         "User-Agent": USER_AGENT,
@@ -137,22 +145,31 @@ def fetch(cfg: dict) -> tuple[str, str]:
     jar.load(cfg["cookie_file"], ignore_discard=True, ignore_expires=True)
 
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    req = urllib.request.Request(
-        cfg["url"],
-        headers=browser_headers(cfg["url"]),
-    )
+    # 最小ヘッダを本命に、駄目なら念のためブラウザ相当も試す。
+    profiles = [("最小", minimal_headers), ("ブラウザ相当", browser_headers)]
     attempts = cfg.get("retries", 3)
+    last_error: Exception | None = None
+
     for attempt in range(1, attempts + 1):
-        try:
-            return _read(opener, req, cfg)
-        except urllib.error.HTTPError as exc:
-            # 500番台はサイト側の一時的な不調のことが多い。少し待ってやり直す。
-            if exc.code not in (429, 500, 502, 503, 504) or attempt == attempts:
-                raise
+        for name, make_headers in profiles:
+            req = urllib.request.Request(cfg["url"], headers=make_headers(cfg["url"]))
+            try:
+                page = _read(opener, req, cfg)
+                if name != profiles[0][0]:
+                    log.info("%sヘッダで取得できました", name)
+                return page
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code not in (429, 500, 502, 503, 504):
+                    raise
+                log.warning("HTTP %s (%sヘッダ)", exc.code, name)
+        if attempt < attempts:
             wait = 5 * 2 ** (attempt - 1)
-            log.warning("HTTP %s。%s秒待ってやり直します (%s/%s)", exc.code, wait, attempt, attempts)
+            log.warning("%s秒待ってやり直します (%s/%s)", wait, attempt, attempts)
             time.sleep(wait)
-    raise RuntimeError("到達しない")
+
+    assert last_error is not None
+    raise last_error
 
 
 def _read(opener, req, cfg: dict) -> tuple[str, str]:
@@ -321,11 +338,11 @@ def diagnose(cfg: dict) -> None:
     jar = http.cookiejar.MozillaCookieJar()
     jar.load(cfg["cookie_file"], ignore_discard=True, ignore_expires=True)
     full = browser_headers(cfg["url"])
-    minimal = {"User-Agent": USER_AGENT}
+    minimal = minimal_headers(cfg["url"])
 
     cases = [
-        ("Cookieあり + ブラウザ風ヘッダ", jar, full),
         ("Cookieあり + 最小ヘッダ", jar, minimal),
+        ("Cookieあり + ブラウザ風ヘッダ", jar, full),
         ("Cookieなし + ブラウザ風ヘッダ", http.cookiejar.CookieJar(), full),
         ("Cookieなし + 最小ヘッダ", http.cookiejar.CookieJar(), minimal),
     ]
